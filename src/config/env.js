@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 module.exports = {
-  port: process.env.PORT || 5000,
+  port: process.env.PORT,
   // Backward compatible keys (some files use nodeEnv)
   nodeEnv: process.env.NODE_ENV || 'development',
   node: process.env.NODE_ENV || 'development',
