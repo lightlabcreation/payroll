@@ -257,7 +257,7 @@ const getProfile = async (req, res, next) => {
         const jobSeekerId = await getJobSeekerId(req.user.id);
 
         const [jobseekerInfo] = await db.query('SELECT * FROM job_seekers WHERE user_id = ?', [req.user.id]);
-        const [profile] = await db.query('SELECT * FROM job_seeker_profiles WHERE job_seeker_id = ?', [jobSeekerId]);
+        const [profile] = await db.query('SELECT * FROM job_seeker_profiles WHERE user_id = ?', [req.user.id]);
         const [skills] = await db.query('SELECT * FROM job_seeker_skills WHERE job_seeker_id = ?', [jobSeekerId]);
         const [experience] = await db.query('SELECT * FROM job_seeker_experience WHERE job_seeker_id = ? ORDER BY start_date DESC', [jobSeekerId]);
         const [education] = await db.query('SELECT * FROM job_seeker_education WHERE job_seeker_id = ? ORDER BY start_year DESC', [jobSeekerId]);
@@ -274,11 +274,22 @@ const getProfile = async (req, res, next) => {
                 professionalSummary: profile[0]?.professional_summary,
                 location: jobseekerInfo[0]?.location || profile[0]?.preferred_location,
                 headline: jobseekerInfo[0]?.level || 'Job Seeker',
-                skills: jobseekerInfo[0]?.skills,
-                experience: experience,
-                education: education,
+                skills: jobseekerInfo[0]?.skills ? jobseekerInfo[0].skills.split(',') : [],
+                experience: experience.map(exp => ({
+                    id: exp.id,
+                    title: exp.job_title,
+                    company: exp.company_name,
+                    duration: exp.duration,
+                    description: exp.description
+                })),
+                education: education.map(edu => ({
+                    id: edu.id,
+                    institution: edu.institution || edu.school_name,
+                    degree: edu.degree,
+                    duration: edu.duration
+                })),
                 industry: profile[0]?.job_industry,
-                role: jobseekerInfo[0]?.current_company, // Mapping loosely
+                role: jobseekerInfo[0]?.current_company || profile[0]?.job_industry,
                 preferred_location: profile[0]?.preferred_location,
                 salary_expectation: profile[0]?.salary_expectation || 'Not Specified',
                 is_visible: profile[0]?.visibility === 'visible'
@@ -312,6 +323,9 @@ const updateProfile = async (req, res, next) => {
         }
 
         // Update job_seekers table
+        let skillsStr = skills;
+        if (Array.isArray(skills)) skillsStr = skills.join(',');
+
         await db.query(`
             UPDATE job_seekers 
             SET name = COALESCE(?, name), phone = COALESCE(?, phone), 
@@ -319,21 +333,42 @@ const updateProfile = async (req, res, next) => {
                 education = COALESCE(?, education), current_company = COALESCE(?, current_company), 
                 level = COALESCE(?, level), location = COALESCE(?, location)
             WHERE user_id = ?
-        `, [name, phone, skills, experience, education, current_company, level || headline, final_location, req.user.id]);
+        `, [name, phone, skillsStr, Array.isArray(experience) ? 'Array' : experience, Array.isArray(education) ? 'Array' : education, current_company, level || headline, final_location, req.user.id]);
 
         // Upsert Profile
-        const [existing] = await db.query('SELECT id FROM job_seeker_profiles WHERE job_seeker_id = ?', [jobSeekerId]);
+        const [existing] = await db.query('SELECT id FROM job_seeker_profiles WHERE user_id = ?', [req.user.id]);
         if (existing.length > 0) {
             await db.query(`
                 UPDATE job_seeker_profiles 
                 SET professional_summary = ?, job_industry = ?, preferred_location = ?, visibility = ?, salary_expectation = ?
-                WHERE job_seeker_id = ?
-            `, [final_summary, final_industry, final_location, final_visibility, salary_expectation, jobSeekerId]);
+                WHERE user_id = ?
+            `, [final_summary, final_industry, final_location, final_visibility, salary_expectation, req.user.id]);
         } else {
             await db.query(`
-                INSERT INTO job_seeker_profiles (job_seeker_id, professional_summary, job_industry, preferred_location, visibility, salary_expectation)
+                INSERT INTO job_seeker_profiles (user_id, professional_summary, job_industry, preferred_location, visibility, salary_expectation)
                 VALUES (?, ?, ?, ?, ?, ?)
-            `, [jobSeekerId, final_summary, final_industry, final_location, final_visibility, salary_expectation]);
+            `, [req.user.id, final_summary, final_industry, final_location, final_visibility, salary_expectation]);
+        }
+
+        // --- Handle Experience and Education Arrays (Sync specialized tables) ---
+        if (Array.isArray(experience)) {
+            await db.query('DELETE FROM job_seeker_experience WHERE job_seeker_id = ?', [jobSeekerId]);
+            for (const exp of experience) {
+                await db.query(`
+                    INSERT INTO job_seeker_experience (job_seeker_id, job_title, company_name, duration, description)
+                    VALUES (?, ?, ?, ?, ?)
+                `, [jobSeekerId, exp.title, exp.company, exp.duration, exp.description]);
+            }
+        }
+
+        if (Array.isArray(education)) {
+            await db.query('DELETE FROM job_seeker_education WHERE job_seeker_id = ?', [jobSeekerId]);
+            for (const edu of education) {
+                await db.query(`
+                    INSERT INTO job_seeker_education (job_seeker_id, degree, institution, school_name, duration)
+                    VALUES (?, ?, ?, ?, ?)
+                `, [jobSeekerId, edu.degree, edu.institution, edu.institution, edu.duration]);
+            }
         }
 
         res.json({ success: true, message: 'Profile updated successfully' });
@@ -343,16 +378,16 @@ const updateProfile = async (req, res, next) => {
 // Skills CRUD
 const addSkill = async (req, res, next) => {
     try {
-        const { skill_name, proficiency } = req.body;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { skill_name, proficiency } = req.body;
         await db.query('INSERT INTO job_seeker_skills (job_seeker_id, skill_name, proficiency) VALUES (?, ?, ?)', [jobSeekerId, skill_name, proficiency]);
         res.json({ success: true, message: 'Skill added' });
     } catch (err) { next(err); }
 };
 const deleteSkill = async (req, res, next) => {
     try {
-        const { id } = req.params;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { id } = req.params;
         await db.query('DELETE FROM job_seeker_skills WHERE id = ? AND job_seeker_id = ?', [id, jobSeekerId]);
         res.json({ success: true, message: 'Skill removed' });
     } catch (err) { next(err); }
@@ -361,8 +396,8 @@ const deleteSkill = async (req, res, next) => {
 // Experience CRUD
 const addExperience = async (req, res, next) => {
     try {
-        const { job_title, company_name, start_date, end_date, is_current, description } = req.body;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { job_title, company_name, start_date, end_date, is_current, description } = req.body;
         await db.query(`
             INSERT INTO job_seeker_experience (job_seeker_id, job_title, company_name, start_date, end_date, is_current, description)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -374,8 +409,8 @@ const addExperience = async (req, res, next) => {
 // Education CRUD
 const addEducation = async (req, res, next) => {
     try {
-        const { degree, school_name, field_of_study, start_year, passing_year, grade } = req.body;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { degree, school_name, field_of_study, start_year, passing_year, grade } = req.body;
         await db.query(`
             INSERT INTO job_seeker_education (job_seeker_id, degree, school_name, field_of_study, start_year, passing_year, grade)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -386,8 +421,8 @@ const addEducation = async (req, res, next) => {
 
 const deleteExperience = async (req, res, next) => {
     try {
-        const { id } = req.params;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { id } = req.params;
         await db.query('DELETE FROM job_seeker_experience WHERE id = ? AND job_seeker_id = ?', [id, jobSeekerId]);
         res.json({ success: true, message: 'Experience removed' });
     } catch (err) { next(err); }
@@ -395,8 +430,8 @@ const deleteExperience = async (req, res, next) => {
 
 const deleteEducation = async (req, res, next) => {
     try {
-        const { id } = req.params;
         const jobSeekerId = await getJobSeekerId(req.user.id);
+        const { id } = req.params;
         await db.query('DELETE FROM job_seeker_education WHERE id = ? AND job_seeker_id = ?', [id, jobSeekerId]);
         res.json({ success: true, message: 'Education removed' });
     } catch (err) { next(err); }

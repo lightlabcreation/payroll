@@ -8,9 +8,12 @@ const getAllJobs = async (req, res, next) => {
     const { search, location, job_type, status, page = 1, limit = 10 } = req.query;
 
     let query = `
-            SELECT j.*, e.company_name, e.company_logo 
+            SELECT j.*, 
+                   COALESCE(c.company_name, e.company_name) as display_company_name, 
+                   COALESCE(c.company_logo, e.company_logo) as display_company_logo
             FROM jobs j 
             LEFT JOIN employers e ON j.employer_id = e.id 
+            LEFT JOIN companies c ON e.company_id = c.id
             WHERE 1=1
         `;
     const params = [];
@@ -53,8 +56,8 @@ const getAllJobs = async (req, res, next) => {
       ...job,
       employer: {
         id: job.employer_id,
-        company_name: job.company_name,
-        company_logo: job.company_logo
+        company_name: job.display_company_name,
+        company_logo: job.display_company_logo
       }
     }));
 
@@ -80,9 +83,13 @@ const getJobById = async (req, res, next) => {
   try {
     const { id } = req.params;
     const query = `
-            SELECT j.*, e.id as emp_id, e.company_name, e.company_logo, e.company_address 
+            SELECT j.*, e.id as emp_id, 
+                   COALESCE(c.company_name, e.company_name) as display_company_name, 
+                   COALESCE(c.company_logo, e.company_logo) as display_company_logo, 
+                   COALESCE(c.company_address, e.company_address) as display_company_address 
             FROM jobs j 
             LEFT JOIN employers e ON j.employer_id = e.id 
+            LEFT JOIN companies c ON e.company_id = c.id
             WHERE j.id = ?
         `;
     const [rows] = await db.query(query, [id]);
@@ -98,9 +105,9 @@ const getJobById = async (req, res, next) => {
       ...job,
       employer: {
         id: job.emp_id,
-        company_name: job.company_name,
-        company_logo: job.company_logo,
-        company_address: job.company_address
+        company_name: job.display_company_name,
+        company_logo: job.display_company_logo,
+        company_address: job.display_company_address
       }
     };
 
@@ -119,7 +126,15 @@ const getActivePlans = async (req, res, next) => {
             WHERE is_active = 1 
             ORDER BY price ASC
         `);
-    res.json({ success: true, data: plans });
+    const formattedPlans = plans.map(plan => {
+      try {
+        plan.features = typeof plan.features === 'string' ? JSON.parse(plan.features) : (plan.features || []);
+      } catch (e) {
+        plan.features = [];
+      }
+      return plan;
+    });
+    res.json({ success: true, data: formattedPlans });
   } catch (error) { next(error); }
 };
 

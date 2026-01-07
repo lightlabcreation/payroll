@@ -68,8 +68,8 @@ class SuperAdminService {
       const [companyResult] = await connection.query(
         `INSERT INTO companies
          (user_id, company_name, company_address, gst_number, pan_number,
-          subscription_plan, admin_id, created_by, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
+          subscription_plan, admin_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
         [
           adminUser.id,
           companyData.company_name,
@@ -77,8 +77,7 @@ class SuperAdminService {
           companyData.gst_number || null,
           companyData.pan_number || null,
           companyData.subscription_plan || 'basic',
-          adminRecordId,
-          createdBySuperAdminId
+          adminRecordId
         ]
       );
 
@@ -196,11 +195,11 @@ class SuperAdminService {
     const params = [];
 
     if (filters.status) {
-      query += ` AND e.status = ?`;
+      query += ` AND c.status = ?`;
       params.push(filters.status);
     }
 
-    query += ` ORDER BY e.created_at DESC`;
+    query += ` ORDER BY c.created_at DESC`;
 
     if (filters.limit) {
       query += ` LIMIT ?`;

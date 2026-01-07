@@ -8,10 +8,13 @@ const bcrypt = require('bcrypt');
  */
 const getDashboard = async (req, res, next) => {
   try {
-    const [empCount] = await db.query('SELECT COUNT(*) as count FROM employers'); // New employers table (Managers)
-    const [employeeCount] = await db.query('SELECT COUNT(*) as count FROM employees');
-    const [vendorCount] = await db.query('SELECT COUNT(*) as count FROM vendors');
-    const [activeEmployerCount] = await db.query("SELECT COUNT(*) as count FROM employers WHERE status = 'active'");
+    const adminCompanyId = req.user.company_id;
+
+    // Filter by admin's company
+    const [empCount] = await db.query('SELECT COUNT(*) as count FROM employers WHERE company_id = ?', [adminCompanyId]);
+    const [employeeCount] = await db.query('SELECT COUNT(*) as count FROM employees emp JOIN employers e ON emp.company_id = e.id WHERE e.company_id = ?', [adminCompanyId]);
+    const [vendorCount] = await db.query('SELECT COUNT(*) as count FROM vendors v JOIN users u ON v.user_id = u.id WHERE u.company_id = ?', [adminCompanyId]);
+    const [activeEmployerCount] = await db.query("SELECT COUNT(*) as count FROM employers WHERE status = 'active' AND company_id = ?", [adminCompanyId]);
 
     res.json({
       success: true,
@@ -34,10 +37,19 @@ const getDashboard = async (req, res, next) => {
  */
 const getDashboardSummary = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
+
+    if (!adminCompanyId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin is not assigned to any company.',
+      });
+    }
+
     // Helper function to safely query tables
-    const safeQuery = async (query, defaultValue = [{ total: 0, active: 0 }]) => {
+    const safeQuery = async (query, params = [], defaultValue = [{ total: 0, active: 0 }]) => {
       try {
-        const [result] = await db.query(query);
+        const [result] = await db.query(query, params);
         return result;
       } catch (error) {
         if (error.code === 'ER_NO_SUCH_TABLE') {
@@ -48,81 +60,159 @@ const getDashboardSummary = async (req, res, next) => {
       }
     };
 
-    // Credits Statistics
-    const creditStats = await safeQuery('SELECT SUM(total_added) as total_added, SUM(balance) as total_balance FROM credits', [{ total_added: 0, total_balance: 0 }]);
+    // Credits Statistics (Sum of credits for employers belonging to this company)
+    const creditStats = await safeQuery(
+      `SELECT SUM(c.total_added) as total_added, SUM(c.balance) as total_balance 
+       FROM credits c 
+       JOIN employers e ON c.employer_id = e.id 
+       WHERE e.company_id = ?`,
+      [adminCompanyId],
+      [{ total_added: 0, total_balance: 0 }]
+    );
 
-    // Transaction Statistics
-    const txnStats = await safeQuery('SELECT COUNT(*) as count FROM transactions', [{ count: 0 }]);
-    const recentTxn = await safeQuery('SELECT COUNT(*) as count FROM transactions WHERE DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)', [{ count: 0 }]);
+    // Transaction Statistics (Transactions for employers belonging to this company)
+    const txnStats = await safeQuery(
+      `SELECT COUNT(*) as count 
+       FROM transactions t
+       JOIN employers e ON t.employer_id = e.id
+       WHERE e.company_id = ?`,
+      [adminCompanyId],
+      [{ count: 0 }]
+    );
+
+    const recentTxn = await safeQuery(
+      `SELECT COUNT(*) as count 
+       FROM transactions t
+       JOIN employers e ON t.employer_id = e.id
+       WHERE e.company_id = ? AND DATE(t.created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)`,
+      [adminCompanyId],
+      [{ count: 0 }]
+    );
 
     // Employer & Employee Statistics
-    const empStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active FROM employers');
-    const employeeStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active FROM employees');
+    const empStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active 
+       FROM employers 
+       WHERE company_id = ?`,
+      [adminCompanyId]
+    );
+
+    const employeeStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active 
+       FROM employees 
+       WHERE company_id = ?`,
+      [adminCompanyId]
+    );
 
     // Vendor Statistics
-    const vendorStats = await safeQuery('SELECT COUNT(*) as total FROM vendors', [{ total: 0 }]);
+    const vendorStats = await safeQuery(
+      `SELECT COUNT(*) as total FROM vendors WHERE company_id = ?`,
+      [adminCompanyId],
+      [{ total: 0 }]
+    );
 
     // Job Portal Statistics
-    const jobStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "Active" THEN 1 END) as active FROM jobs');
-    const seekerStats = await safeQuery('SELECT COUNT(*) as total FROM users WHERE role = "jobseeker"', [{ total: 0 }]);
+    const jobStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN j.status = "Active" THEN 1 END) as active 
+       FROM jobs j
+       JOIN employers e ON j.employer_id = e.id
+       WHERE e.company_id = ?`,
+      [adminCompanyId]
+    );
 
-    // Training Statistics
-    const trainingStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "ongoing" THEN 1 END) as ongoing FROM training_courses');
+    const seekerStats = await safeQuery(
+      'SELECT COUNT(*) as total FROM users WHERE role = "jobseeker"',
+      [],
+      [{ total: 0 }]
+    );
 
-    // Bill Companies Statistics
-    const billCompanyStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "pending" THEN 1 END) as active FROM billing_companies');
+    // Training Statistics (assuming training_courses are global or company-specific?)
+    // If they have an employer_id, we can filter. Let's check schema.
+    const trainingStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN tc.status = "ongoing" THEN 1 END) as ongoing 
+       FROM training_courses tc
+       JOIN employers e ON tc.employer_id = e.id
+       WHERE e.company_id = ?`,
+      [adminCompanyId]
+    );
+
+    // Bill Companies Statistics (Assuming they are global or linked to employers)
+    const billCompanyStats = await safeQuery(
+      'SELECT COUNT(*) as total, COUNT(CASE WHEN status = "pending" THEN 1 END) as active FROM billing_companies WHERE company_id = ?',
+      [adminCompanyId]
+    );
 
     // Payment Setup Statistics (using payment_setups table)
-    const gatewayStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN active = 1 THEN 1 END) as active FROM payment_setups', [{ total: 0, active: 0 }]);
-    const bankStats = await safeQuery('SELECT COUNT(*) as total FROM bank_details', [{ total: 0, verified: 0 }]);
+    const gatewayStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN ps.active = 1 THEN 1 END) as active 
+       FROM payment_setups ps
+       JOIN employers e ON ps.company_id = e.id
+       WHERE e.company_id = ?`,
+      [adminCompanyId],
+      [{ total: 0, active: 0 }]
+    );
 
-    // Subscription Statistics
-    const subStats = await safeQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active FROM subscriptions');
+    const bankStats = await safeQuery(
+      `SELECT COUNT(*) as total 
+       FROM bank_details bd
+       JOIN employees emp ON bd.employee_id = emp.id
+       WHERE emp.company_id = ?`,
+      [adminCompanyId],
+      [{ total: 0, verified: 0 }]
+    );
+
+    // Subscription Statistics (for the company itself)
+    const subStats = await safeQuery(
+      `SELECT COUNT(*) as total, COUNT(CASE WHEN status = "active" THEN 1 END) as active 
+       FROM subscriptions 
+       WHERE employer_id IN (SELECT id FROM employers WHERE company_id = ?)`,
+      [adminCompanyId]
+    );
 
     res.json({
       success: true,
       data: {
         // Credits
-        totalCreditsAdded: parseFloat(creditStats[0].total_added || 0),
-        creditsAssigned: parseFloat(creditStats[0].total_balance || 0),
+        totalCreditsAdded: parseFloat(creditStats[0]?.total_added || 0),
+        creditsAssigned: parseFloat(creditStats[0]?.total_balance || 0),
 
         // Transactions
-        totalTransactions: txnStats[0].count,
-        recentTransactions: recentTxn[0].count,
+        totalTransactions: txnStats[0]?.count || 0,
+        recentTransactions: recentTxn[0]?.count || 0,
 
         // Employers
-        totalEmployers: empStats[0].total,
-        activeEmployers: empStats[0].active,
+        totalEmployers: empStats[0]?.total || 0,
+        activeEmployers: empStats[0]?.active || 0,
 
         // Employees
-        totalEmployees: employeeStats[0].total,
-        activeEmployees: employeeStats[0].active,
+        totalEmployees: employeeStats[0]?.total || 0,
+        activeEmployees: employeeStats[0]?.active || 0,
 
         // Vendors
-        totalVendors: vendorStats[0].total,
+        totalVendors: vendorStats[0]?.total || 0,
 
         // Job Portal
-        totalJobs: jobStats[0].total,
-        activeJobs: jobStats[0].active,
-        totalJobSeekers: seekerStats[0].total,
+        totalJobs: jobStats[0]?.total || 0,
+        activeJobs: jobStats[0]?.active || 0,
+        totalJobSeekers: seekerStats[0]?.total || 0,
 
         // Training
-        totalTrainings: trainingStats[0].total,
-        ongoingTrainings: trainingStats[0].ongoing || 0,
+        totalTrainings: trainingStats[0]?.total || 0,
+        ongoingTrainings: trainingStats[0]?.ongoing || 0,
 
         // Bill Companies
-        totalBillCompanies: billCompanyStats[0].total,
-        activeBillCompanies: billCompanyStats[0].active,
+        totalBillCompanies: billCompanyStats[0]?.total || 0,
+        activeBillCompanies: billCompanyStats[0]?.active || 0,
 
         // Payment Setup
-        totalPaymentGateways: gatewayStats[0].total,
-        activePaymentGateways: gatewayStats[0].active,
-        totalBankAccounts: bankStats[0].total,
-        verifiedBankAccounts: bankStats[0].verified || 0,
+        totalPaymentGateways: gatewayStats[0]?.total || 0,
+        activePaymentGateways: gatewayStats[0]?.active || 0,
+        totalBankAccounts: bankStats[0]?.total || 0,
+        verifiedBankAccounts: bankStats[0]?.verified || 0,
 
         // Subscriptions
-        totalSubscriptions: subStats[0].total,
-        activeSubscriptions: subStats[0].active,
+        totalSubscriptions: subStats[0]?.total || 0,
+        activeSubscriptions: subStats[0]?.active || 0,
       },
     });
   } catch (error) {
@@ -218,12 +308,14 @@ const getEmployerById = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Main query
+    // Main query - JOIN credits to get balance
     const [rows] = await db.query(`
       SELECT e.*, 
-             u.name as u_name, u.email as u_email, u.phone as u_phone, u.status as u_status, u.created_at as u_created_at
+             u.name as u_name, u.email as u_email, u.phone as u_phone, u.status as u_status, u.created_at as u_created_at,
+             c.balance as credit_balance
       FROM employers e
       JOIN users u ON e.user_id = u.id
+      LEFT JOIN credits c ON e.id = c.employer_id
       WHERE e.id = ?
     `, [id]);
 
@@ -234,6 +326,16 @@ const getEmployerById = async (req, res, next) => {
     // Fetch related array info
     const [paymentSetups] = await db.query('SELECT * FROM payment_setups WHERE company_id = ?', [id]);
     const [creditTransactions] = await db.query('SELECT * FROM credit_transactions WHERE employer_id = ?', [id]);
+
+    // Extract bank details for form pre-fill
+    let bankDetails = {};
+    const bankSetup = paymentSetups.find(p => p.provider === 'bank_transfer');
+    if (bankSetup && bankSetup.config) {
+      try {
+        const config = typeof bankSetup.config === 'string' ? JSON.parse(bankSetup.config) : bankSetup.config;
+        bankDetails = config; // { bank_name, account_number, ifsc_code... }
+      } catch (e) { }
+    }
 
     // Construct response
     const result = {
@@ -246,8 +348,13 @@ const getEmployerById = async (req, res, next) => {
         status: emp.u_status,
         created_at: emp.u_created_at
       },
+      // Ensure balance is mapped correctly
+      balance: emp.credit_balance ? parseFloat(emp.credit_balance) : 0,
+      // Spread bank details for frontend form
+      ...bankDetails,
+      paymentSetups,
       // cleanup flat fields
-      u_name: undefined, u_email: undefined, u_phone: undefined, u_status: undefined, u_created_at: undefined
+      u_name: undefined, u_email: undefined, u_phone: undefined, u_status: undefined, u_created_at: undefined, credit_balance: undefined
     };
 
     res.json({ success: true, data: result });
@@ -264,12 +371,14 @@ const getEmployerById = async (req, res, next) => {
  */
 const getTransactions = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const [transactions] = await db.query(`
       SELECT t.*, e.company_name as employer_name
       FROM transactions t
-      LEFT JOIN employers e ON t.employer_id = e.id
+      JOIN employers e ON t.employer_id = e.id
+      WHERE e.company_id = ?
       ORDER BY t.created_at DESC
-    `);
+    `, [adminCompanyId]);
 
     res.json({
       success: true,
@@ -300,6 +409,7 @@ const createEmployer = async (req, res, next) => {
   try {
     const { name, email, password, company_name, company_address, gst_number, pan_number, phone,
       bank_name, account_number, ifsc_code, branch } = req.body;
+    // console.log(req.body)
 
     const [existingUser] = await connection.query('SELECT id FROM users WHERE email = ?', [email]);
     if (existingUser.length > 0) {
@@ -381,6 +491,7 @@ const createEmployer = async (req, res, next) => {
 
 const getAllEmployers = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     // Similar query to getEmployers using JOINs
     const sql = `
       SELECT e.*,
@@ -391,9 +502,10 @@ const getAllEmployers = async (req, res, next) => {
       JOIN users u ON e.user_id = u.id
       LEFT JOIN credits c ON e.id = c.employer_id
       LEFT JOIN employer_wallets w ON e.id = w.employer_id
+      WHERE u.company_id = ?
       ORDER BY e.created_at DESC
     `;
-    const [rows] = await db.query(sql);
+    const [rows] = await db.query(sql, [adminCompanyId]);
 
     // Map payment setups separately if needed or just skip for 'All' collection if performance heavy
     // Let's do map with IDs
@@ -445,6 +557,7 @@ const updateEmployer = async (req, res, next) => {
     const { id } = req.params;
     const { company_name, company_address, gst_number, pan_number, status, name, email, phone,
       bank_name, account_number, ifsc_code, branch } = req.body;
+
 
     // Check employer
     const [empRows] = await connection.query('SELECT * FROM employers WHERE id = ?', [id]);
@@ -722,14 +835,16 @@ const createEmployee = async (req, res, next) => {
 
 const getAllEmployees = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const [employees] = await db.query(`
       SELECT emp.*, u.name as u_name, u.email as u_email, u.status as u_status,
       e.company_name
       FROM employees emp
       JOIN users u ON emp.user_id = u.id
       LEFT JOIN companies e ON emp.company_id = e.id
+      WHERE emp.company_id = ?
       ORDER BY emp.created_at DESC
-    `);
+    `, [adminCompanyId]);
 
     const formatted = employees.map(emp => ({
       id: emp.id,
@@ -891,12 +1006,14 @@ const createVendor = async (req, res, next) => {
 
 const getAllVendors = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const [vendors] = await db.query(`
       SELECT v.*, u.name as u_name, u.email as u_email, u.status as u_status
       FROM vendors v
       JOIN users u ON v.user_id = u.id
+      WHERE v.company_id = ?
       ORDER BY v.created_at DESC
-    `);
+    `, [adminCompanyId]);
 
     const formatted = vendors.map(v => ({
       ...v,
@@ -1142,7 +1259,8 @@ const getMySubscription = async (req, res, next) => {
       SELECT s.*, p.name as plan_name, p.price as plan_price, p.description as plan_desc 
       FROM subscriptions s
       LEFT JOIN plans p ON s.plan_id = p.id
-      WHERE s.employer_id = ? AND s.status = 'active'
+      WHERE s.employer_id = ?
+      ORDER BY s.created_at DESC
       LIMIT 1
       `, [employerId]);
 
@@ -1456,7 +1574,7 @@ const getTrainings = async (req, res, next) => {
     // Updated query to include enrolled and completed counts
     // Using V2 tables: training_courses, course_assignments
     const [trainings] = await db.query(`
-      SELECT t.*, 
+      SELECT t.*, t.trainer_name as instructor,
         (SELECT COUNT(*) FROM course_assignments ta WHERE ta.training_id = t.id) as enrolled,
         (SELECT COUNT(*) FROM course_assignments ta WHERE ta.training_id = t.id AND ta.status = 'Completed') as completed
       FROM training_courses t
@@ -1505,10 +1623,10 @@ const createTraining = async (req, res, next) => {
     if (!targetEmployerId) return res.status(400).json({ success: false, message: 'Employer context required.' });
 
     const status = 'scheduled'; // Default status from enum: 'scheduled','ongoing','completed','cancelled'
-    // trainings table has: trainer_name (not instructor), no duration/category columns
+    // trainings table has: trainer_name (alias instructor), duration, category
     await db.query(
-      'INSERT INTO training_courses (employer_id, title, description, trainer_name, start_date, end_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-      [targetEmployerId, title, description, instructor || null, start_date || null, end_date || null, status]
+      'INSERT INTO training_courses (employer_id, title, description, trainer_name, duration, category, start_date, end_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
+      [targetEmployerId, title, description, instructor || null, duration || null, category || null, start_date || null, end_date || null, status]
     );
 
     res.json({ success: true, message: 'Training created successfully.' });
@@ -1691,7 +1809,7 @@ const updateTraining = async (req, res, next) => {
 
     await db.query(`
       UPDATE training_courses 
-      SET title=?, description=?, start_date=?, end_date=?, instructor=?, duration=?, category=?, status=?
+      SET title=?, description=?, start_date=?, end_date=?, trainer_name=?, duration=?, category=?, status=?
       WHERE id=?
     `, [title, description, start_date, end_date, instructor, duration, category, status, id]);
 
@@ -1707,7 +1825,8 @@ const updateTraining = async (req, res, next) => {
 
 const getBillCompanies = async (req, res, next) => {
   try {
-    const [companies] = await db.query('SELECT * FROM billing_companies ORDER BY created_at DESC');
+    const adminCompanyId = req.user.company_id;
+    const [companies] = await db.query('SELECT * FROM billing_companies WHERE company_id = ? ORDER BY created_at DESC', [adminCompanyId]);
 
     // Add billing_code if missing
     const formatted = companies.map(c => ({
@@ -1723,11 +1842,12 @@ const getBillCompanies = async (req, res, next) => {
 
 const createBillCompany = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { name, category, billingCode, level, status } = req.body;
     if (!name || !billingCode) return res.status(400).json({ success: false, message: 'Name and Billing Code required' });
 
-    await db.query('INSERT INTO billing_companies (name, category, billing_code, level, status) VALUES (?, ?, ?, ?, ?)',
-      [name, category, billingCode, level, status || 'Active']);
+    await db.query('INSERT INTO billing_companies (company_id, name, category, billing_code, level, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [adminCompanyId, name, category, billingCode, level, status || 'Active']);
 
     res.status(201).json({ success: true, message: 'Company added successfully' });
   } catch (error) {
@@ -1737,11 +1857,16 @@ const createBillCompany = async (req, res, next) => {
 
 const updateBillCompany = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
     const { name, category, billingCode, level, status } = req.body;
 
-    await db.query('UPDATE billing_companies SET name=?, category=?, billing_code=?, level=?, status=? WHERE id=?',
-      [name, category, billingCode, level, status, id]);
+    const [result] = await db.query('UPDATE billing_companies SET name=?, category=?, billing_code=?, level=?, status=? WHERE id=? AND company_id=?',
+      [name, category, billingCode, level, status, id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Billing company not found or permission denied.' });
+    }
 
     res.json({ success: true, message: 'Company updated successfully' });
   } catch (error) {
@@ -1751,8 +1876,14 @@ const updateBillCompany = async (req, res, next) => {
 
 const deleteBillCompany = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
-    await db.query('DELETE FROM billing_companies WHERE id=?', [id]);
+    const [result] = await db.query('DELETE FROM billing_companies WHERE id=? AND company_id=?', [id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Billing company not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Company deleted successfully' });
   } catch (error) {
     next(error);
@@ -1840,7 +1971,8 @@ const updatePaymentSetup = async (req, res, next) => {
 // --- Payment Gateways (New) ---
 const getPaymentGateways = async (req, res, next) => {
   try {
-    const [gateways] = await db.query('SELECT * FROM payment_gateways ORDER BY created_at DESC');
+    const adminCompanyId = req.user.company_id;
+    const [gateways] = await db.query('SELECT * FROM payment_gateways WHERE company_id = ? ORDER BY created_at DESC', [adminCompanyId]);
     res.json({ success: true, data: gateways });
   } catch (error) {
     next(error);
@@ -1849,11 +1981,12 @@ const getPaymentGateways = async (req, res, next) => {
 
 const createPaymentGateway = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { name, apiKey, webhookUrl, transactionFee, supportedMethods, logo, status } = req.body;
     await db.query(`
-      INSERT INTO payment_gateways (name, api_key, webhook_url, transaction_fee, supported_methods, logo, status) 
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [name, apiKey, webhookUrl, transactionFee, JSON.stringify(supportedMethods), logo, status || 'Active']);
+      INSERT INTO payment_gateways (company_id, name, api_key, webhook_url, transaction_fee, supported_methods, logo, status) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [adminCompanyId, name, apiKey, webhookUrl, transactionFee, JSON.stringify(supportedMethods), logo, status || 'Active']);
     res.status(201).json({ success: true, message: 'Gateway added successfully' });
   } catch (error) {
     next(error);
@@ -1862,13 +1995,19 @@ const createPaymentGateway = async (req, res, next) => {
 
 const updatePaymentGateway = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
     const { name, apiKey, webhookUrl, transactionFee, supportedMethods, logo, status } = req.body;
-    await db.query(`
+    const [result] = await db.query(`
       UPDATE payment_gateways 
       SET name=?, api_key=?, webhook_url=?, transaction_fee=?, supported_methods=?, logo=?, status=? 
-      WHERE id=?
-    `, [name, apiKey, webhookUrl, transactionFee, JSON.stringify(supportedMethods), logo, status, id]);
+      WHERE id=? AND company_id=?
+    `, [name, apiKey, webhookUrl, transactionFee, JSON.stringify(supportedMethods), logo, status, id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Gateway not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Gateway updated successfully' });
   } catch (error) {
     next(error);
@@ -1877,8 +2016,14 @@ const updatePaymentGateway = async (req, res, next) => {
 
 const deletePaymentGateway = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
-    await db.query('DELETE FROM payment_gateways WHERE id=?', [id]);
+    const [result] = await db.query('DELETE FROM payment_gateways WHERE id=? AND company_id=?', [id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Gateway not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Gateway deleted successfully' });
   } catch (error) {
     next(error);
@@ -1888,7 +2033,8 @@ const deletePaymentGateway = async (req, res, next) => {
 // --- Bank Accounts (New) ---
 const getBankAccounts = async (req, res, next) => {
   try {
-    const [accounts] = await db.query('SELECT * FROM company_bank_accounts ORDER BY created_at DESC');
+    const adminCompanyId = req.user.company_id;
+    const [accounts] = await db.query('SELECT * FROM company_bank_accounts WHERE company_id = ? ORDER BY created_at DESC', [adminCompanyId]);
     res.json({ success: true, data: accounts });
   } catch (error) {
     next(error);
@@ -1897,11 +2043,12 @@ const getBankAccounts = async (req, res, next) => {
 
 const createBankAccount = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status } = req.body;
     await db.query(`
-      INSERT INTO company_bank_accounts (bank_name, account_holder, account_number, ifsc_code, branch, transaction_limit, processing_time, status) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status || 'Pending Verification']);
+      INSERT INTO company_bank_accounts (company_id, bank_name, account_holder, account_number, ifsc_code, branch, transaction_limit, processing_time, status) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [adminCompanyId, bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status || 'Pending Verification']);
     res.status(201).json({ success: true, message: 'Bank account added successfully' });
   } catch (error) {
     next(error);
@@ -1910,13 +2057,19 @@ const createBankAccount = async (req, res, next) => {
 
 const updateBankAccount = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
     const { bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status } = req.body;
-    await db.query(`
+    const [result] = await db.query(`
       UPDATE company_bank_accounts 
       SET bank_name=?, account_holder=?, account_number=?, ifsc_code=?, branch=?, transaction_limit=?, processing_time=?, status=? 
-      WHERE id=?
-    `, [bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status, id]);
+      WHERE id=? AND company_id=?
+    `, [bankName, accountHolder, accountNumber, ifscCode, branch, transactionLimit, processingTime, status, id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Bank account not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Bank account updated successfully' });
   } catch (error) {
     next(error);
@@ -1925,8 +2078,14 @@ const updateBankAccount = async (req, res, next) => {
 
 const deleteBankAccount = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
-    await db.query('DELETE FROM company_bank_accounts WHERE id=?', [id]);
+    const [result] = await db.query('DELETE FROM company_bank_accounts WHERE id=? AND company_id=?', [id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Bank account not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Bank account deleted successfully' });
   } catch (error) {
     next(error);
@@ -1937,7 +2096,8 @@ const deleteBankAccount = async (req, res, next) => {
 // --- Job Vacancies (New) ---
 const getJobVacancies = async (req, res, next) => {
   try {
-    const [vacancies] = await db.query('SELECT j.*, e.company_name as employer_name FROM jobs j LEFT JOIN employers e ON j.employer_id = e.id ORDER BY j.created_at DESC');
+    const adminCompanyId = req.user.company_id;
+    const [vacancies] = await db.query('SELECT * FROM job_vacancies WHERE company_id = ? ORDER BY created_at DESC', [adminCompanyId]);
     res.json({ success: true, data: vacancies });
   } catch (error) {
     next(error);
@@ -1946,11 +2106,12 @@ const getJobVacancies = async (req, res, next) => {
 
 const createJobVacancy = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { title, department, location, description, salary, employer, jobType, experience, expiryDate, requirements, status, level } = req.body;
     await db.query(`
-      INSERT INTO job_vacancies (title, department, location, description, salary_min, employer_name, job_type, experience_required, expiry_date, skills, status, level) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [title, department, location, description, salary /* using salary as min for now */, employer, jobType, experience, expiryDate, requirements, status || 'Active', level]);
+      INSERT INTO job_vacancies (company_id, title, department, location, description, salary_min, employer_name, job_type, experience_required, expiry_date, skills, status, level) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [adminCompanyId, title, department, location, description, salary /* using salary as min for now */, employer, jobType, experience, expiryDate, requirements, status || 'Active', level]);
     res.status(201).json({ success: true, message: 'Vacancy created successfully' });
   } catch (error) {
     next(error);
@@ -1959,13 +2120,19 @@ const createJobVacancy = async (req, res, next) => {
 
 const updateJobVacancy = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
     const { title, department, location, description, salary, employer, jobType, experience, expiryDate, requirements, status, level } = req.body;
-    await db.query(`
+    const [result] = await db.query(`
       UPDATE job_vacancies 
       SET title=?, department=?, location=?, description=?, salary_min=?, employer_name=?, job_type=?, experience_required=?, expiry_date=?, skills=?, status=?, level=?
-      WHERE id=?
-    `, [title, department, location, description, salary, employer, jobType, experience, expiryDate, requirements, status, level, id]);
+      WHERE id=? AND company_id=?
+    `, [title, department, location, description, salary, employer, jobType, experience, expiryDate, requirements, status, level, id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Vacancy not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Vacancy updated successfully' });
   } catch (error) {
     next(error);
@@ -1974,8 +2141,14 @@ const updateJobVacancy = async (req, res, next) => {
 
 const deleteJobVacancy = async (req, res, next) => {
   try {
+    const adminCompanyId = req.user.company_id;
     const { id } = req.params;
-    await db.query('DELETE FROM jobs WHERE id=?', [id]);
+    const [result] = await db.query('DELETE FROM job_vacancies WHERE id=? AND company_id=?', [id, adminCompanyId]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Vacancy not found or permission denied.' });
+    }
+
     res.json({ success: true, message: 'Vacancy deleted successfully' });
   } catch (error) {
     next(error);
@@ -1985,16 +2158,18 @@ const deleteJobVacancy = async (req, res, next) => {
 // --- Job Seekers (New) ---
 const getJobSeekers = async (req, res, next) => {
   try {
-    // Job seekers are users with role='jobseeker'
+    const adminCompanyId = req.user.company_id;
+    // Job seekers are users with role='jobseeker' + their profile
+    // Using subquery for count to safely get profile fields associated with the user
     const [seekers] = await db.query(`
       SELECT u.id, u.name, u.email, u.phone, u.status, u.created_at, u.last_login,
-             COUNT(ja.id) as applications_count
+             p.skills, p.experience, p.education, p.current_company as currentCompany, p.level,
+             (SELECT COUNT(*) FROM job_applications ja JOIN jobs j ON ja.job_id = j.id JOIN employers e ON j.employer_id = e.id WHERE ja.jobseeker_id = u.id AND e.company_id = ?) as applications_count
       FROM users u
-      LEFT JOIN job_applications ja ON u.id = ja.jobseeker_id
+      LEFT JOIN job_seeker_profiles p ON u.id = p.user_id
       WHERE u.role = 'jobseeker'
-      GROUP BY u.id
       ORDER BY u.created_at DESC
-    `);
+    `, [adminCompanyId]);
     res.json({ success: true, data: seekers });
   } catch (error) {
     next(error);
@@ -2015,10 +2190,19 @@ const createJobSeeker = async (req, res, next) => {
     const hashedPassword = await bcrypt.hash(password || 'jobseeker123', 10);
 
     // Create user with role jobseeker
-    await db.query(`
+    const [userResult] = await db.query(`
       INSERT INTO users (name, email, password, phone, role, status, created_at, updated_at) 
       VALUES (?, ?, ?, ?, 'jobseeker', 'active', NOW(), NOW())
     `, [name, email, hashedPassword, phone || null]);
+
+    const userId = userResult.insertId;
+    const { skills, experience, education, currentCompany, level } = req.body;
+
+    // Create profile
+    await db.query(`
+      INSERT INTO job_seeker_profiles (user_id, skills, experience, education, current_company, level)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [userId, skills || '', experience || '', education || '', currentCompany || '', level || 'Entry']);
 
     res.status(201).json({ success: true, message: 'Job seeker added successfully' });
   } catch (error) {
@@ -2041,15 +2225,14 @@ const getJobSeekerById = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Job seeker not found' });
     }
 
-    // Get applications
     const [applications] = await db.query(`
       SELECT ja.*, j.title as job_title, j.location, e.company_name
       FROM job_applications ja
-      LEFT JOIN jobs j ON ja.job_id = j.id
-      LEFT JOIN employers e ON j.employer_id = e.id
-      WHERE ja.jobseeker_id = ?
+      JOIN jobs j ON ja.job_id = j.id
+      JOIN employers e ON j.employer_id = e.id
+      WHERE ja.jobseeker_id = ? AND e.company_id = ?
       ORDER BY ja.applied_at DESC
-    `, [id]);
+    `, [id, adminCompanyId]);
 
     res.json({
       success: true,
@@ -2106,6 +2289,88 @@ const deleteJobSeeker = async (req, res, next) => {
     // Delete user (this will cascade delete applications if FK is set)
     await db.query('DELETE FROM users WHERE id = ?', [id]);
     res.json({ success: true, message: 'Job seeker deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getPendingCreditRequests = async (req, res, next) => {
+  try {
+    const adminCompanyId = req.user.company_id;
+    const [requests] = await db.query(`
+      SELECT t.*, e.company_name as employer_name, u.name as requested_by_name
+      FROM transactions t
+      JOIN employers e ON t.employer_id = e.id
+      JOIN users u ON t.user_id = u.id
+      WHERE e.company_id = ? AND t.type = 'credit' AND t.status = 'pending'
+      ORDER BY t.created_at DESC
+    `, [adminCompanyId]);
+
+    res.json({
+      success: true,
+      data: requests
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const approveCreditRequest = async (req, res, next) => {
+  const connection = await db.getConnection();
+  await connection.beginTransaction();
+  try {
+    const { id } = req.params;
+    const [txnRows] = await connection.query('SELECT * FROM transactions WHERE id = ? AND status = ?', [id, 'pending']);
+    if (txnRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Pending transaction not found.' });
+    }
+    const txn = txnRows[0];
+
+    // 1. Update Transaction
+    await connection.query('UPDATE transactions SET status = ?, updated_at = NOW() WHERE id = ?', ['success', id]);
+
+    // 2. Update Employer Credits
+    const [creditRows] = await connection.query('SELECT * FROM credits WHERE employer_id = ?', [txn.employer_id]);
+    const amount = parseFloat(txn.amount);
+
+    if (creditRows.length > 0) {
+      await connection.query(
+        'UPDATE credits SET balance = balance + ?, total_added = total_added + ?, updated_at = NOW() WHERE employer_id = ?',
+        [amount, amount, txn.employer_id]
+      );
+    } else {
+      await connection.query(
+        'INSERT INTO credits (employer_id, balance, total_added, total_used, created_at, updated_at) VALUES (?, ?, ?, 0, NOW(), NOW())',
+        [txn.employer_id, amount, amount]
+      );
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Credit request approved successfully.' });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const rejectCreditRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const [result] = await db.query(
+      'UPDATE transactions SET status = ?, description = CONCAT(description, ?), updated_at = NOW() WHERE id = ? AND status = ?',
+      ['failed', reason ? ` (Rejected: ${reason})` : ' (Rejected)', id, 'pending']
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Pending transaction not found.' });
+    }
+
+    res.json({ success: true, message: 'Credit request rejected.' });
   } catch (error) {
     next(error);
   }
@@ -2173,5 +2438,8 @@ module.exports = {
   // Retaining only unique exports
   getPaymentGateways, createPaymentGateway, updatePaymentGateway, deletePaymentGateway,
   getBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
+  approveCreditRequest,
+  rejectCreditRequest,
+  getPendingCreditRequests,
 };
 

@@ -6,7 +6,7 @@ const upload = require('../middlewares/upload.middleware');
 
 // All routes require authentication and 'jobseeker' role
 router.use(authenticate);
-router.use(authorize('jobseeker'));
+router.use(authorize('jobseeker', 'employee', 'employer'));
 
 // Dashboard & Jobs
 router.get('/dashboard', jobseekerController.getDashboardJobs);

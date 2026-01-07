@@ -157,6 +157,7 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
  * Get All Jobs (for employer)
  */
 const getAllJobs = async (req, res, next) => {
+  console.log(`GET /api/employer/jobs called by user ${req.user.id}`);
   try {
     const [empRows] = await db.query('SELECT * FROM employers WHERE user_id = ?', [req.user.id]);
     if (empRows.length === 0) {
@@ -959,9 +960,9 @@ const getMyVendors = async (req, res, next) => {
         SELECT v.*, v.service_type as services, v.salary, v.joining_date, u.name as u_name, u.email as u_email, u.phone as u_phone, u.status as u_status 
         FROM vendors v
         JOIN users u ON v.user_id = u.id
-        WHERE v.company_id = ?
+        WHERE v.company_id = ? AND (v.employer_id = ? OR v.employer_id IS NULL)
   ORDER BY v.created_at DESC
-    `, [employer.company_id]);
+    `, [employer.company_id, employer.id]);
 
     const formatted = vendors.map(v => ({
       ...v,
@@ -1037,9 +1038,9 @@ VALUES(?, ?, ?, ?, 'vendor', ?, 'active', NOW(), NOW())`,
     // Insert into vendors table
     // mapping job_title to service_type based on existing schema
     const [vendorResult] = await connection.execute(
-      `INSERT INTO vendors(user_id, company_id, company_name, contact_person, phone, email, service_type, salary, joining_date, status, created_at, updated_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
-      [userId, employer.company_id, name, name, phone, email, finalJobTitle, salary || 0, joining_date]
+      `INSERT INTO vendors(user_id, company_id, employer_id, company_name, contact_person, phone, email, service_type, salary, joining_date, status, created_at, updated_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
+      [userId, employer.company_id, employer.id, name, name, phone, email, finalJobTitle, salary || 0, joining_date]
     );
 
     await connection.commit();
@@ -1070,7 +1071,9 @@ const updateVendor = async (req, res, next) => {
     const { company_name, contact_person, phone, email, address, service_type, job_title, designation, payment_status, status, salary, joining_date, name: userName } = req.body;
     const finalJobTitle = service_type || job_title || designation;
 
-    const [vendorRows] = await connection.query('SELECT * FROM vendors WHERE id = ?', [vendorId]);
+    const [empRows] = await db.query('SELECT id FROM employers WHERE user_id = ?', [req.user.id]);
+    const employer = empRows[0];
+    const [vendorRows] = await connection.query('SELECT * FROM vendors WHERE id = ? AND employer_id = ?', [vendorId, employer.id]);
     const vendor = vendorRows[0];
 
     if (!vendor) {
@@ -1317,7 +1320,7 @@ const createTraining = async (req, res, next) => {
       });
     }
 
-    const { title, description, trainer_name, start_date, end_date, location, max_participants } = req.body;
+    const { title, description, instructor, trainer_name, start_date, end_date, location, max_participants, category } = req.body;
 
     if (!title || !start_date || !end_date) {
       return res.status(400).json({
@@ -1326,10 +1329,12 @@ const createTraining = async (req, res, next) => {
       });
     }
 
+    const tName = trainer_name || instructor || 'N/A';
+
     const [result] = await db.query(
-      `INSERT INTO training_courses(employer_id, title, description, trainer_name, start_date, end_date, location, max_participants, status, created_at, updated_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NOW(), NOW())`,
-      [employer.id, title, description, trainer_name, new Date(start_date), new Date(end_date), location, max_participants]
+      `INSERT INTO training_courses(employer_id, title, description, trainer_name, start_date, end_date, location, max_participants, category, status, created_at, updated_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NOW(), NOW())`,
+      [employer.id, title, description || '', tName, new Date(start_date), new Date(end_date), location || 'Virtual', max_participants || 100, category || 'Technical']
     );
 
     const [training] = await db.query('SELECT * FROM training_courses WHERE id = ?', [result.insertId]);
@@ -1604,8 +1609,8 @@ const payVendor = async (req, res, next) => {
         SELECT v.*, u.name as u_name
         FROM vendors v
         JOIN users u ON v.user_id = u.id
-        WHERE v.id = ?
-  `, [vendorId]);
+        WHERE v.id = ? AND v.employer_id = ?
+  `, [vendorId, employer.id]);
     const vendor = vendorRows[0];
 
     if (!vendor) {
@@ -1760,6 +1765,37 @@ SELECT * FROM transactions
   }
 };
 
+/**
+ * Request More Credit
+ */
+const requestCredit = async (req, res, next) => {
+  try {
+    const { amount, reason } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
+    }
+
+    const [empRows] = await db.query('SELECT * FROM employers WHERE user_id = ?', [req.user.id]);
+    if (empRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Employer profile not found.' });
+    }
+    const employer = empRows[0];
+
+    await db.query(`
+      INSERT INTO transactions (user_id, employer_id, type, amount, description, status, date, created_at, updated_at)
+      VALUES (?, ?, 'credit', ?, ?, 'pending', NOW(), NOW(), NOW())
+    `, [req.user.id, employer.id, amount, reason || 'Credit Request']);
+
+    res.json({
+      success: true,
+      message: 'Credit request submitted successfully and is pending approval.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getDashboard,
   createJob,
@@ -1779,6 +1815,7 @@ module.exports = {
   addEmployee,
   updateEmployee,
   deleteEmployee,
+  requestCredit,
   // Vendor Management
   getMyVendors,
   addVendor,

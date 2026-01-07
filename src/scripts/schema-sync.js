@@ -70,6 +70,25 @@ async function syncSchema() {
                 total_hours: 'DECIMAL(5, 2)',
                 working_hours: 'DECIMAL(5, 2)',
                 notes: 'TEXT'
+            },
+            transactions: {
+                transaction_id: 'VARCHAR(100)',
+                payment_method: 'VARCHAR(50)',
+                description: 'TEXT'
+            },
+            job_seeker_profiles: {
+                user_id: 'INT',
+                skills: 'TEXT',
+                experience: 'VARCHAR(100)',
+                education: 'VARCHAR(200)',
+                current_company: 'VARCHAR(150)',
+                level: 'VARCHAR(50)',
+                resume_url: 'VARCHAR(255)'
+            },
+            training_courses: {
+                trainer_name: 'VARCHAR(100)',
+                duration: 'VARCHAR(50)',
+                category: 'VARCHAR(50)'
             }
         };
 

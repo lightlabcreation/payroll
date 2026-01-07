@@ -378,16 +378,52 @@ const getEmployerCreditHistory = async (req, res, next) => {
     const page = parseInt(req.query.page) || 1;
     const offset = (page - 1) * limit;
 
+    // We use a UNION to get data from both credit_transactions (ledger) and transactions (requests/salary/etc.)
     const [rows] = await db.query(`
-        SELECT ct.*, u.name as admin_name 
+      (
+        SELECT 
+          ct.id, 
+          ct.amount, 
+          ct.transaction_type as type, 
+          ct.description as reference_note, 
+          NULL as payment_mode, 
+          ct.transaction_id, 
+          ct.created_at,
+          'Success' as status,
+          u.name as admin_name
         FROM credit_transactions ct
         LEFT JOIN users u ON ct.created_by = u.id
         WHERE ct.employer_id = ? AND ct.is_deleted = 0
-        ORDER BY ct.created_at DESC
-        LIMIT ? OFFSET ?
-    `, [employer_id, limit, offset]);
+      )
+      UNION ALL
+      (
+        SELECT 
+          t.id, 
+          t.amount, 
+          t.type, 
+          t.description as reference_note, 
+          t.payment_method as payment_mode, 
+          t.transaction_id, 
+          t.created_at,
+          t.status,
+          NULL as admin_name
+        FROM transactions t
+        WHERE t.employer_id = ? AND (
+          (t.type = 'credit' AND t.status = 'pending') OR
+          (t.type IN ('salary', 'vendor_payment'))
+        )
+      )
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `, [employer_id, employer_id, limit, offset]);
 
-    const [countResult] = await db.query('SELECT COUNT(*) as total FROM credit_transactions WHERE employer_id = ? AND is_deleted = 0', [employer_id]);
+    const [countResult] = await db.query(`
+      SELECT (
+        (SELECT COUNT(*) FROM credit_transactions WHERE employer_id = ? AND is_deleted = 0) +
+        (SELECT COUNT(*) FROM transactions WHERE employer_id = ? AND ((type = 'credit' AND status = 'pending') OR (type IN ('salary', 'vendor_payment'))))
+      ) as total
+    `, [employer_id, employer_id]);
+
     const count = countResult[0].total;
 
     res.json({
@@ -399,6 +435,7 @@ const getEmployerCreditHistory = async (req, res, next) => {
         reference_note: txn.reference_note,
         payment_mode: txn.payment_mode,
         transaction_id: txn.transaction_id,
+        status: txn.status,
         added_by: txn.admin_name || 'System',
         created_at: txn.created_at,
       })),

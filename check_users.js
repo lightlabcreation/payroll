@@ -1,7 +1,21 @@
-const db = require('./src/config/mysql');
-async function run() {
-    const [users] = await db.query('SELECT id, name, email, role, company_id FROM users WHERE id IN (29, 31)');
-    console.log('USERS:', JSON.stringify(users));
-    process.exit(0);
+const mysql = require('mysql2/promise');
+require('dotenv').config({ path: './.env' });
+
+const config = {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'payroll_db'
+};
+
+async function check() {
+    try {
+        const connection = await mysql.createConnection(config);
+        const [rows] = await connection.query('SELECT name, email, role FROM users');
+        rows.forEach(r => console.log(`${r.name} | ${r.email} | ${r.role}`));
+        await connection.end();
+    } catch (err) {
+        console.error(err);
+    }
 }
-run();
+check();

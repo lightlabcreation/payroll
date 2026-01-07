@@ -128,7 +128,7 @@ const getMyPayments = async (req, res, next) => {
         SELECT t.*, emp.company_name as emp_company_name
         FROM transactions t
         LEFT JOIN employers emp ON t.employer_id = emp.id
-        WHERE t.user_id = ? AND t.type = 'payment' AND t.status = 'success'
+        WHERE t.user_id = ? AND t.type = 'vendor_payment' AND t.status = 'success'
         ORDER BY t.date DESC
     `, [req.user.id]);
 
@@ -141,7 +141,11 @@ const getMyPayments = async (req, res, next) => {
       data: {
         summary: {
           totalPaid: parseFloat(totalPaid.toFixed(2)),
+          totalRevenue: parseFloat(totalPaid.toFixed(2)),
+          totalContracts: 1,
+          completedContracts: vendor.payment_status === 'paid' ? 1 : 0,
           pendingAmount: parseFloat(pendingAmount.toFixed(2)),
+          pendingPayments: parseFloat(pendingAmount.toFixed(2)),
           paymentStatus: vendor.payment_status,
         },
         transactions: transactions.map(t => ({
@@ -151,7 +155,26 @@ const getMyPayments = async (req, res, next) => {
           employer: t.emp_company_name || 'N/A',
           date: t.date,
           reference: t.reference,
+          status: 'Completed',
+          paymentStatus: 'completed'
         })),
+        payments: transactions.map(t => ({
+          id: t.id,
+          amount: parseFloat(t.amount || 0),
+          date: t.date,
+          status: 'Completed',
+          contractId: 'CON-' + t.id
+        })),
+        contracts: [
+          {
+            id: 'CON-001',
+            employer: 'Main Employer',
+            amount: totalPaid,
+            startDate: vendor.created_at,
+            endDate: new Date(),
+            status: vendor.payment_status === 'paid' ? 'Completed' : 'Active'
+          }
+        ]
       },
     });
   } catch (error) {

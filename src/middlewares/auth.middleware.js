@@ -90,7 +90,11 @@ const authorize = (...allowedRoles) => {
       });
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
+    const userRole = req.user.role.toLowerCase();
+    const normalizedAllowedRoles = allowedRoles.map(r => r.toLowerCase());
+
+    if (!normalizedAllowedRoles.includes(userRole)) {
+      console.warn(`[AUTH] Access denied for user ${req.user.id}. Role: ${req.user.role}. Required: ${allowedRoles.join(', ')}`);
       return res.status(403).json({
         success: false,
         message: `Access denied. Required role(s): ${allowedRoles.join(', ')}`,

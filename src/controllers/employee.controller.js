@@ -11,10 +11,12 @@ const getDashboard = async (req, res, next) => {
 
     // A. Basic Employee & User Info
     const [empRows] = await db.query(`
-      SELECT e.*, u.name, u.email, u.phone, u.address, u.profile_image, emp.company_name as emp_company_name 
+      SELECT e.*, u.name, u.email, u.phone, u.address, u.profile_image, 
+             COALESCE(emp.company_name, c.company_name) as display_company_name
       FROM employees e
       JOIN users u ON e.user_id = u.id
       LEFT JOIN employers emp ON e.employer_id = emp.id
+      LEFT JOIN companies c ON e.company_id = c.id
       WHERE e.user_id = ?
     `, [userId]);
     const employee = empRows[0];
@@ -72,7 +74,7 @@ const getDashboard = async (req, res, next) => {
           id: employee.id,
           name: employee.name,
           designation: employee.designation,
-          company: employee.emp_company_name,
+          company: employee.display_company_name,
           profile_image: employee.profile_image,
           credit_balance: parseFloat(employee.credit_balance || 0)
         },
@@ -187,9 +189,38 @@ const getSalaryHistory = async (req, res, next) => {
       JOIN users u ON emp_rec.user_id = u.id
       LEFT JOIN employers e ON emp_rec.employer_id = e.id
       WHERE s.employee_id = ?
-      ORDER BY s.month DESC, s.year DESC
+      ORDER BY s.year DESC, 
+               CASE s.month 
+                 WHEN 'January' THEN 1 WHEN 'February' THEN 2 WHEN 'March' THEN 3 
+                 WHEN 'April' THEN 4 WHEN 'May' THEN 5 WHEN 'June' THEN 6 
+                 WHEN 'July' THEN 7 WHEN 'August' THEN 8 WHEN 'September' THEN 9 
+                 WHEN 'October' THEN 10 WHEN 'November' THEN 11 WHEN 'December' THEN 12 
+               END DESC
     `, [emp[0].id]);
-    res.json({ success: true, data: rows });
+
+    const formattedRows = rows.map(r => {
+      const gross = parseFloat(r.gross_salary || r.amount || 0);
+      const pf = parseFloat(r.pf || 0);
+      const tds = parseFloat(r.tds || 0);
+      const profTax = parseFloat(r.professional_tax || 0);
+      const totalDeductions = pf + tds + profTax;
+      const net = parseFloat(r.net_salary || (gross - totalDeductions) || gross);
+
+      return {
+        ...r, // Keep original snake_case fields
+        grossSalary: gross,
+        netSalary: net,
+        basicSalary: r.basic_salary,
+        total_deductions: totalDeductions,
+        gross_salary: gross,
+        net_salary: net,
+        basic_salary: r.basic_salary,
+        paymentDate: r.payment_date,
+        paymentMethod: r.payment_method,
+      };
+    });
+
+    res.json({ success: true, data: formattedRows });
   } catch (err) { next(err); }
 };
 
@@ -267,7 +298,7 @@ const getBills = async (req, res, next) => {
     if (emp.length === 0) return res.json({ success: true, data: [] });
 
     const [rows] = await db.query(`
-      SELECT b.*
+      SELECT b.*, b.name as company_name, b.paid_date as payment_date
       FROM bills b
       WHERE b.employee_id = ?
       ORDER BY b.created_at DESC
@@ -376,11 +407,16 @@ const getAttendance = async (req, res, next) => {
 
     const [rows] = await db.query(`
       SELECT *, 
-             DATE_FORMAT(date, '%Y-%m-%d') as date_str,
-             DATE_FORMAT(check_in, '%H:%i:%s') as check_in_time_raw,
-             DATE_FORMAT(check_out, '%H:%i:%s') as check_out_time_raw,
+             DATE_FORMAT(date, '%Y-%m-%d') as date,
              DATE_FORMAT(check_in, '%h:%i %p') as check_in_time,
-             DATE_FORMAT(check_out, '%h:%i %p') as check_out_time
+             DATE_FORMAT(check_out, '%h:%i %p') as check_out_time,
+             IF(check_out IS NULL, '-', CONCAT(COALESCE(working_hours, '0.00'), ' hrs')) as duration,
+             CONCAT(UCASE(LEFT(status, 1)), SUBSTRING(status, 2)) as status,
+             CASE 
+               WHEN TIME(check_in) > '10:00:00' THEN 
+                 TIME_FORMAT(TIMEDIFF(TIME(check_in), '10:00:00'), '%Hh %im')
+               ELSE 'On Time' 
+             END as late_by
       FROM attendance 
       WHERE employee_id = ? 
       ORDER BY date DESC
@@ -396,10 +432,12 @@ const getTrainings = async (req, res, next) => {
   try {
     const [emp] = await db.query("SELECT id FROM employees WHERE user_id = ?", [req.user.id]);
     const [rows] = await db.query(`
-      SELECT e.*, c.title, c.description, c.start_date, c.due_date, c.trainer_name
-      FROM training_enrollments e
-      JOIN training_courses c ON e.training_id = c.id
-      WHERE e.employee_id = ?
+      SELECT te.id, te.status, te.test_score as score, te.created_at,
+             c.title as course_title, c.title as name, c.description, c.start_date, c.end_date,
+             c.trainer_name, c.duration, c.category
+      FROM training_enrollments te
+      JOIN training_courses c ON te.training_id = c.id
+      WHERE te.employee_id = ?
       ORDER BY c.start_date DESC
     `, [emp[0].id]);
     res.json({ success: true, data: rows });
@@ -413,10 +451,13 @@ const getTests = async (req, res, next) => {
   try {
     const [emp] = await db.query("SELECT id FROM employees WHERE user_id = ?", [req.user.id]);
     const [rows] = await db.query(`
-      SELECT e.id as enrollment_id, e.test_status, e.test_score, c.title as course_name 
-      FROM training_enrollments e
-      JOIN training_courses c ON e.training_id = c.id
-      WHERE e.employee_id = ?
+      SELECT te.id, te.id as enrollment_id, te.status, te.test_score as score,
+             c.title as course_title, c.title as course_name,
+             'Final Assessment' as test_title, 'Final Assessment' as name,
+             c.end_date as test_date, '60 Mins' as duration, '20' as total_questions
+      FROM training_enrollments te
+      JOIN training_courses c ON te.training_id = c.id
+      WHERE te.employee_id = ?
     `, [emp[0].id]);
     res.json({ success: true, data: rows });
   } catch (err) { next(err); }
@@ -426,10 +467,11 @@ const getCertificates = async (req, res, next) => {
   try {
     const [emp] = await db.query("SELECT id FROM employees WHERE user_id = ?", [req.user.id]);
     const [rows] = await db.query(`
-      SELECT e.certificate_id, e.certificate_url, e.updated_at as issue_date, c.title as course_name
-      FROM training_enrollments e
-      JOIN training_courses c ON e.training_id = c.id
-      WHERE e.employee_id = ? AND e.test_status = 'passed'
+      SELECT te.id, te.id as certificate_id, 'Generated' as certificate_url, te.updated_at as issue_date, 
+             c.title as course_title, c.title as course_name
+      FROM training_enrollments te
+      JOIN training_courses c ON te.training_id = c.id
+      WHERE te.employee_id = ? AND te.status = 'Completed'
     `, [emp[0].id]);
     res.json({ success: true, data: rows });
   } catch (err) { next(err); }
@@ -494,11 +536,15 @@ const getTransactions = async (req, res, next) => {
 const getMyApplications = async (req, res, next) => {
   try {
     const [rows] = await db.query(`
-      SELECT ja.*, j.title as job_title, e.company_name
+      SELECT ja.*, 
+             j.title as job_title, j.location, j.salary_min, j.salary_max, 
+             j.created_at as job_created_at, j.job_type, j.description as job_description,
+             e.company_name
       FROM job_applications ja
       JOIN jobs j ON ja.job_id = j.id
       JOIN employers e ON j.employer_id = e.id
       WHERE ja.jobseeker_id = ?
+      ORDER BY ja.applied_at DESC
     `, [req.user.id]);
     res.json({ success: true, data: rows });
   } catch (err) { next(err); }
@@ -510,8 +556,12 @@ const getAllJobs = async (req, res, next) => {
       SELECT j.*, e.company_name
       FROM jobs j
       JOIN employers e ON j.employer_id = e.id
-      WHERE j.status = 'active'
-    `);
+      WHERE j.status = 'Active'
+      AND j.id NOT IN (
+        SELECT job_id FROM job_applications WHERE jobseeker_id = ? AND status != 'Withdrawn'
+      )
+      ORDER BY j.created_at DESC
+    `, [req.user.id]);
     res.json({ success: true, data: rows });
   } catch (err) { next(err); }
 };
@@ -529,7 +579,7 @@ const applyForJob = async (req, res, next) => {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
-    if (jobRows[0].status !== 'active') {
+    if (jobRows[0].status !== 'Active') {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Job is no longer active' });
     }
@@ -548,14 +598,27 @@ const applyForJob = async (req, res, next) => {
     const [userRows] = await connection.query('SELECT name, email, phone FROM users WHERE id = ?', [userId]);
     const user = userRows[0];
 
-    // 4. Create Application
+    const { cover_letter, resume_id, experience, skills, education, phone } = req.body;
+
+    // 4. Get Resume Path
+    let resumePath = null;
+    if (resume_id) {
+      const [resRows] = await connection.query('SELECT file_path FROM resumes WHERE id = ? AND user_id = ?', [resume_id, userId]);
+      if (resRows.length > 0) resumePath = resRows[0].file_path;
+    }
+
+    // 5. Create Application
     await connection.query(`
             INSERT INTO job_applications (
                 job_id, jobseeker_id, status, applied_at, 
-                applicant_name, email, phone,
+                applicant_name, email, phone, resume, cover_letter,
+                experience, skills, education,
                 created_at, updated_at
-            ) VALUES (?, ?, 'Under Review', NOW(), ?, ?, ?, NOW(), NOW())
-        `, [jobId, userId, user.name, user.email, user.phone]);
+            ) VALUES (?, ?, 'Under Review', NOW(), ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        `, [
+      jobId, userId, user.name, user.email, phone || user.phone,
+      resumePath, cover_letter || null, experience || null, skills || null, education || null
+    ]);
 
     // 5. Increment Count
     await connection.query('UPDATE jobs SET applicants_count = applicants_count + 1 WHERE id = ?', [jobId]);

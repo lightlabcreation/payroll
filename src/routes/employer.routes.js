@@ -18,10 +18,11 @@ router.get('/transactions', employerController.getTransactions);
 router.get('/beneficiaries', employerController.getBeneficiaries);
 router.get('/credit-history', employerController.getCreditHistory);
 router.get('/transaction-chart', employerController.getTransactionChart);
+router.post('/request-credit', employerController.requestCredit);
 
 // Job CRUD
-router.post('/jobs', validateCreateJob, employerController.createJob);
 router.get('/jobs', employerController.getAllJobs);
+router.post('/jobs', validateCreateJob, employerController.createJob);
 router.get('/jobs/:id', employerController.getJobById);
 router.put('/jobs/:id', validateUpdateJob, employerController.updateJob);
 router.delete('/jobs/:id', employerController.deleteJob);

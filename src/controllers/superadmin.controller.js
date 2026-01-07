@@ -27,6 +27,11 @@ const getDashboard = async (req, res, next) => {
       'SELECT id, name, email, role, status, created_at FROM users ORDER BY created_at DESC LIMIT 10'
     );
 
+    // Get analytics summary
+    const [[{ count: activePlans }]] = await db.query('SELECT COUNT(*) as count FROM subscriptions WHERE status = "active" AND end_date >= NOW()');
+    const [[{ count: expiredPlans }]] = await db.query('SELECT COUNT(*) as count FROM subscriptions WHERE status = "expired" OR (status = "active" AND end_date < NOW())');
+    const [[{ revenue: monthlyRevenue }]] = await db.query('SELECT SUM(amount) as revenue FROM payments WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 MONTH)');
+
     res.json({
       success: true,
       data: {
@@ -39,6 +44,9 @@ const getDashboard = async (req, res, next) => {
           totalApplications,
           activeUsers,
           blockedUsers,
+          activePlans: activePlans || 0,
+          expiredPlans: expiredPlans || 0,
+          monthlyRevenue: monthlyRevenue || 0
         },
         recentUsers,
       },
@@ -782,11 +790,17 @@ const getAllCompanies = async (req, res, next) => {
     const { status, search } = req.query;
     let query = `
         SELECT e.*, 
-               u.email as user_email, u.name as user_name, u.status as user_status, u.last_login, u.created_at as user_created_at,
+               COALESCE(u.email, u2.email) as user_email, 
+               COALESCE(u.name, u2.name) as user_name, 
+               COALESCE(u.status, u2.status) as user_status, 
+               COALESCE(u.last_login, u2.last_login) as last_login, 
+               COALESCE(u.created_at, u2.created_at) as user_created_at,
                s.plan_id as sub_plan_id, s.status as sub_status, s.start_date as sub_start, s.end_date as sub_end,
                p.name as plan_name, p.price as plan_price
         FROM companies e
         LEFT JOIN users u ON e.user_id = u.id
+        LEFT JOIN admins a ON e.admin_id = a.id
+        LEFT JOIN users u2 ON a.user_id = u2.id
         LEFT JOIN (
             SELECT * FROM subscriptions WHERE id IN (
                 SELECT MAX(id) FROM subscriptions GROUP BY employer_id
@@ -862,7 +876,7 @@ const assignPlanToCompany = async (req, res, next) => {
   const connection = await db.getConnection();
   await connection.beginTransaction();
   try {
-    const { employerId } = req.params;
+    const { id: employerId } = req.params;
     const { plan_id, start_date, auto_renew } = req.body;
 
     if (!plan_id) {
@@ -940,7 +954,7 @@ const updateCompany = async (req, res, next) => {
   const connection = await db.getConnection();
   await connection.beginTransaction();
   try {
-    const { employerId } = req.params;
+    const { id: employerId } = req.params;
     const { company_name, company_address, gst_number, pan_number, company_logo, name, email } = req.body;
 
     const [empRows] = await connection.query('SELECT * FROM companies WHERE id = ?', [employerId]);
@@ -1017,30 +1031,41 @@ const updateCompany = async (req, res, next) => {
  */
 const deleteCompany = async (req, res, next) => {
   const connection = await db.getConnection();
-  await connection.beginTransaction();
   try {
     const { id } = req.params;
 
-    const [empRows] = await connection.query('SELECT user_id FROM companies WHERE id = ?', [id]);
-    if (empRows.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Company not found.' });
-    }
-    const userId = empRows[0].user_id;
+    // Disable FK checks to handle potential orphaned data/circular refs
+    await connection.query('SET FOREIGN_KEY_CHECKS = 0');
+    await connection.beginTransaction();
 
-    // Delete user (cascade will likely handle employer, but we delete explicitly or let cascade work if FK set up)
-    // Assuming DB Constraints handle cascade DELETE on employer when user is deleted, or vice versa.
-    // Safest to delete user if that's the parent.
-    await connection.query('DELETE FROM users WHERE id = ?', [userId]);
+    // Get company details to find user and admin (optional, for cleanup)
+    const [empRows] = await connection.query('SELECT user_id, admin_id FROM companies WHERE id = ?', [id]);
+
+    // 1. Delete Subscriptions (Always)
+    await connection.query('DELETE FROM subscriptions WHERE employer_id = ?', [id]);
+
+    // 2. Delete Company (Employer)
+    await connection.query('DELETE FROM companies WHERE id = ?', [id]);
+
+    // 3. Delete Extra Records if found
+    if (empRows.length > 0) {
+      const { user_id, admin_id } = empRows[0];
+      if (admin_id) await connection.query('DELETE FROM admins WHERE id = ?', [admin_id]);
+      if (user_id) await connection.query('DELETE FROM users WHERE id = ?', [user_id]);
+    }
 
     await connection.commit();
+    await connection.query('SET FOREIGN_KEY_CHECKS = 1');
 
     res.json({
       success: true,
       message: 'Company deleted successfully.',
     });
   } catch (error) {
-    if (connection) await connection.rollback();
+    if (connection) {
+      await connection.rollback();
+      await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+    }
     next(error);
   } finally {
     if (connection) connection.release();
@@ -1054,7 +1079,7 @@ const toggleCompanyStatus = async (req, res, next) => {
   const connection = await db.getConnection();
   await connection.beginTransaction();
   try {
-    const { employerId } = req.params;
+    const { id: employerId } = req.params;
     const { status } = req.body;
 
     if (!['active', 'inactive', 'suspended'].includes(status)) {
@@ -1931,9 +1956,12 @@ const activateSubscription = async (req, res, next) => {
     }
 
     // 2. Only calculate and update dates if it was pending
+    let startDate = subscription.start_date;
+    let endDate = subscription.end_date;
+
     if (subscription.status === 'pending') {
-      const startDate = new Date();
-      const endDate = new Date(startDate);
+      startDate = new Date();
+      endDate = new Date(startDate);
       endDate.setMonth(endDate.getMonth() + (subscription.duration_months || 1));
 
       // 2.1 DEACTIVATE OLD PLANS: Ensure only this one is active for the company
